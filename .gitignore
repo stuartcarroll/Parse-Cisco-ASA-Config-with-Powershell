@@ -1,0 +1,7 @@
+# Firewall configuration files - contain sensitive data
+show running-config.txt
+*running-config*.txt
+
+# General config files that may contain secrets
+*.conf
+*.cfg
