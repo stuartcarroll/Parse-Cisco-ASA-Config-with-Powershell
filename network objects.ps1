@@ -17,7 +17,7 @@ $serviceGroupPattern = '(?m)^object-group service (\S+)\r?\n(?: .+\r?\n?)+'
 $icmpGroupPattern = '(?m)^object-group icmp-type (\S+)\r?\n(?: .+\r?\n?)+'
 $aclPattern = '(?m)^access-list (\S+) extended (permit|deny) (\S+) (.+)$'
 $natPattern = '(?m)^nat \((\S+),(\S+)\) source (static|dynamic) (\S+) (\S+) destination (static|dynamic) (\S+) (\S+)(.*)$'
-
+$ikePolicyPattern = '(?m)^crypto ikev2 policy (\d+)\r?\n(?: .+\r?\n?)+'
 
 # Get matches 
 $serviceMatches = [regex]::Matches($config, $servicePattern)
@@ -27,6 +27,7 @@ $serviceGroupMatches = [regex]::Matches($config, $serviceGroupPattern)
 $icmpGroupMatches = [regex]::Matches($config, $icmpGroupPattern)
 $aclMatches = [regex]::Matches($config, $aclPattern)
 $natMatches = [regex]::Matches($config, $natPattern)
+$ikePolicyMatches = [regex]::Matches($config, $ikePolicyPattern)
 
 # Parse network objects
 $networkObjects = @()
@@ -374,6 +375,239 @@ foreach ($match in $natMatches) {
     }
 }
 
+# ============================================
+# PARSE IKE POLICIES (Phase 1)
+# ============================================
+
+$ikePolicies = @()
+
+foreach ($match in $ikePolicyMatches) {
+    $block = $match.Value
+    $priority = ($block -split '\r?\n')[0] -replace '^crypto ikev2 policy ', ''
+    
+    $encryption = $null
+    $integrity = $null
+    $group = $null
+    $prf = $null
+    $lifetime = $null
+    
+    $lines = ($block -split '\r?\n' | Select-Object -Skip 1) | ForEach-Object { $_.Trim() }
+    
+    foreach ($line in $lines) {
+        if ($line -match '^encryption (.+)$') { $encryption = $matches[1] }
+        if ($line -match '^integrity (.+)$') { $integrity = $matches[1] }
+        if ($line -match '^group (.+)$') { $group = $matches[1] }
+        if ($line -match '^prf (.+)$') { $prf = $matches[1] }
+        if ($line -match '^lifetime seconds (\d+)$') { $lifetime = $matches[1] }
+    }
+    
+    $ikePolicies += [PSCustomObject]@{
+        Priority   = $priority
+        Encryption = $encryption
+        Integrity  = $integrity
+        DHGroup    = $group
+        PRF        = $prf
+        Lifetime   = $lifetime
+    }
+}
+
+# ============================================
+# PARSE TRANSFORM SETS (Phase 2 Proposals)
+# ============================================
+
+
+$transformSetLines = $config -split '\r?\n' | Where-Object { $_ -match '^crypto ipsec ikev1 transform-set' }
+
+$transformSets = @()
+
+foreach ($line in $transformSetLines) {
+    if ($line -match '^crypto ipsec ikev1 transform-set (\S+) (.+)$') {
+        $name = $matches[1]
+        $remainder = $matches[2]
+        
+        $mode = 'tunnel'
+        if ($remainder -match 'mode transport') {
+            $mode = 'transport'
+            $remainder = $remainder -replace '\s*mode transport\s*', ' '
+        }
+        
+        $transforms = $remainder.Trim() -split '\s+'
+        
+        $transformSets += [PSCustomObject]@{
+            Name       = $name
+            Transforms = $transforms -join ', '
+            Mode       = $mode
+        }
+    }
+}
+
+
+# ============================================
+# PARSE TUNNEL GROUPS
+# ============================================
+
+$tunnelGroupTypes = $config -split '\r?\n' | Where-Object { $_ -match '^tunnel-group \S+ type' }
+
+$tunnelGroups = @()
+
+foreach ($line in $tunnelGroupTypes) {
+    if ($line -match '^tunnel-group (\S+) type (\S+)$') {
+        $peerIP = $matches[1]
+        $type = $matches[2]
+        
+        $ipsecAttrPattern = "(?m)^tunnel-group $([regex]::Escape($peerIP)) ipsec-attributes\r?\n(?: .+\r?\n?)+"
+        $ipsecAttrMatch = [regex]::Match($config, $ipsecAttrPattern)
+        
+        $ikeVersion = $null
+        $psk = $false
+        
+        if ($ipsecAttrMatch.Success) {
+            $attrBlock = $ipsecAttrMatch.Value
+            if ($attrBlock -match 'ikev2') { $ikeVersion = 'ikev2' }
+            elseif ($attrBlock -match 'ikev1') { $ikeVersion = 'ikev1' }
+            if ($attrBlock -match 'pre-shared-key') { $psk = $true }
+        }
+        
+        $tunnelGroups += [PSCustomObject]@{
+            PeerIP     = $peerIP
+            Type       = $type
+            IKEVersion = $ikeVersion
+            PSK        = $psk
+        }
+    }
+}
+
+# ============================================
+# PARSE CRYPTO MAPS
+# ============================================
+
+$cryptoMapLines = $config -split '\r?\n' | Where-Object { $_ -match '^crypto map \S+ \d+' }
+
+$cryptoMapEntries = @{}
+
+foreach ($line in $cryptoMapLines) {
+    if ($line -match '^crypto map (\S+) (\d+) (.+)$') {
+        $mapName = $matches[1]
+        $sequence = $matches[2]
+        $setting = $matches[3]
+        
+        $key = "$mapName-$sequence"
+        
+        if (-not $cryptoMapEntries.ContainsKey($key)) {
+            $cryptoMapEntries[$key] = [PSCustomObject]@{
+                MapName       = $mapName
+                Sequence      = $sequence
+                Peer          = $null
+                ACL           = $null
+                TransformSets = $null
+                PFS           = $null
+                SALifetime    = $null
+                SALifetimeKB  = $null
+                NATTDisable   = $false
+            }
+        }
+        
+        $entry = $cryptoMapEntries[$key]
+        
+        if ($setting -match '^match address (\S+)') { $entry.ACL = $matches[1] }
+        if ($setting -match '^set peer (\S+)') { $entry.Peer = $matches[1] }
+        if ($setting -match '^set ikev1 transform-set (.+)$') { $entry.TransformSets = $matches[1] }
+        if ($setting -match '^set ikev2 ipsec-proposal (.+)$') { $entry.TransformSets = $matches[1] }
+        if ($setting -match '^set pfs (\S+)') { $entry.PFS = $matches[1] }
+        if ($setting -match '^set security-association lifetime seconds (\d+)') { $entry.SALifetime = $matches[1] }
+        if ($setting -match '^set security-association lifetime kilobytes (\d+)') { $entry.SALifetimeKB = $matches[1] }
+        if ($setting -match '^set nat-t-disable') { $entry.NATTDisable = $true }
+    }
+}
+
+$cryptoMaps = $cryptoMapEntries.Values | Sort-Object MapName, { [int]$_.Sequence }
+
+# ============================================
+# UNIFIED VPN VIEW (S2S only)
+# ============================================
+
+$vpnConfigs = @()
+
+foreach ($cryptoMap in $cryptoMaps) {
+    $peer = $cryptoMap.Peer
+    $tunnelGroup = $tunnelGroups | Where-Object { $_.PeerIP -eq $peer }
+    
+    if ($tunnelGroup.Type -ne 'ipsec-l2l') { continue }
+    
+    $vpnConfigs += [PSCustomObject]@{
+        Name          = "VPN-$peer"
+        Peer          = $peer
+        IKEVersion    = $tunnelGroup.IKEVersion
+        ACL           = $cryptoMap.ACL
+        TransformSets = $cryptoMap.TransformSets
+        PFS           = $cryptoMap.PFS
+        SALifetime    = $cryptoMap.SALifetime
+        NATTDisable   = $cryptoMap.NATTDisable
+    }
+}
+
+# ============================================
+# RESOLVE PHASE 2 SELECTORS
+# ============================================
+
+function Resolve-ObjectToSubnet {
+    param($objectName)
+    
+    $obj = $networkObjects | Where-Object { $_.Name -eq $objectName }
+    if ($obj) {
+        $def = $obj.Definition
+        if ($def -match 'host (\S+)') { return "$($matches[1])/32" }
+        if ($def -match 'subnet (\S+) (\S+)') { return "$($matches[1]) $($matches[2])" }
+        return $def
+    }
+    
+    $grp = $networkGroups | Where-Object { $_.Name -eq $objectName }
+    if ($grp) { return $grp.Members }
+    
+    return $objectName
+}
+
+$phase2Selectors = @()
+
+foreach ($vpn in $vpnConfigs) {
+    $aclName = $vpn.ACL
+    $aclEntries = $accessLists | Where-Object { $_.ACLName -eq $aclName }
+    
+    foreach ($entry in $aclEntries) {
+        $localNet = $null
+        $remoteNet = $null
+        
+        if ($entry.Source -match '^object:(.+)$') {
+            $localNet = Resolve-ObjectToSubnet $matches[1]
+        }
+        elseif ($entry.Source -match '^group:(.+)$') {
+            $localNet = Resolve-ObjectToSubnet $matches[1]
+        }
+        elseif ($entry.Source -match '^subnet:(.+)$') {
+            $localNet = $matches[1]
+        }
+        
+        if ($entry.Destination -match '^object:(.+)$') {
+            $remoteNet = Resolve-ObjectToSubnet $matches[1]
+        }
+        elseif ($entry.Destination -match '^group:(.+)$') {
+            $remoteNet = Resolve-ObjectToSubnet $matches[1]
+        }
+        elseif ($entry.Destination -match '^subnet:(.+)$') {
+            $remoteNet = $matches[1]
+        }
+        
+        $phase2Selectors += [PSCustomObject]@{
+            Peer      = $vpn.Peer
+            VPNName   = $vpn.Name
+            LocalNet  = $localNet
+            RemoteNet = $remoteNet
+        }
+    }
+}
+
+
+
 #Count objects parsed
 Write-Host "Parsed $($networkObjects.Count) network objects."
 Write-Host "Parsed $($serviceObjects.Count) service objects."
@@ -382,27 +616,38 @@ Write-Host "Parsed $($serviceGroups.Count) service groups."
 Write-Host "Parsed $($icmpGroups.Count) ICMP type groups."
 Write-Host "Parsed $($accessLists.Count) access-list entries."
 Write-Host "Parsed $($natRules.Count) NAT rules."
+Write-Host "Parsed $($ikePolicies.Count) IKE policies."
+Write-Host "Parsed $($transformSets.Count) transform sets."
+Write-Host "Parsed $($tunnelGroups.Count) tunnel groups."
+Write-Host "Parsed $($cryptoMaps.Count) crypto map entries."
+
+
 
 # Output the parsed objects
-write-Host "`Network Objects:"
-write-Host "----------------"
+write-Host "`Network Objects:"  -ForegroundColor Green
 $networkObjects | Format-Table -AutoSize
-write-Host "`Service Objects:"
-write-Host "----------------"
+write-Host "`Service Objects:"  -ForegroundColor Green
 $serviceObjects | Format-Table -AutoSize
-write-Host "`Network Groups:"
-write-Host "----------------"
+write-Host "`Network Groups:"  -ForegroundColor Green
 $networkGroups | Format-Table -AutoSize
-write-Host "`Service Groups:"
-write-Host "----------------"  
+write-Host "`Service Groups:"  -ForegroundColor Green
 $serviceGroups | Format-Table -AutoSize
-write-Host "`ICMP Type Groups:"
-write-Host "----------------"
+write-Host "`ICMP Type Groups:"  -ForegroundColor Green
 $icmpGroups | Format-Table -AutoSize
-write-Host "`Access-Lists:"
-write-Host "----------------"
+write-Host "`Access-Lists:"  -ForegroundColor Green
 $accessLists | Format-Table -AutoSize
-write-Host "`NAT Rules:"
-write-Host "----------------"
+write-Host "`NAT Rules:"  -ForegroundColor Green
 $natRules | Format-Table -AutoSize
-#>
+Write-Host "`nIKE Policies (Phase 1):" -ForegroundColor Green
+$ikePolicies | Format-Table -AutoSize
+Write-Host "`nTransform Sets (Phase 2):" -ForegroundColor Green
+$transformSets | Format-Table -AutoSize
+Write-Host "`nTunnel Groups (S2S):" -ForegroundColor Green
+$tunnelGroups | Where-Object { $_.Type -eq 'ipsec-l2l' } | Format-Table -AutoSize
+Write-Host "`nCrypto Maps:" -ForegroundColor Green
+$cryptoMaps | Format-Table -AutoSize
+Write-Host "`nUnified VPN Configs:" -ForegroundColor Green
+$vpnConfigs | Format-Table -AutoSize
+Write-Host "`nPhase 2 Selectors:" -ForegroundColor Green
+$phase2Selectors | Format-Table -AutoSize
+
