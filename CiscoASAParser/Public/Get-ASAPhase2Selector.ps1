@@ -48,11 +48,45 @@ function Get-ASAPhase2Selector {
         $networkObjects = Get-ASANetworkObject -Config $configContent
         $networkGroups = Get-ASANetworkGroup -Config $configContent
 
-        # Helper function to resolve object to subnet
+        # Helper function to resolve object/group to subnet(s) recursively
         function Resolve-ToSubnet {
-            param($objectName)
+            param($reference)
 
-            $obj = $networkObjects | Where-Object { $_.Name -eq $objectName }
+            $results = @()
+
+            # Handle object:name format
+            if ($reference -match '^object:(.+)$') {
+                $objectName = $matches[1]
+                $obj = $networkObjects | Where-Object { $_.Name -eq $objectName }
+                if ($obj) {
+                    $def = $obj.Definition
+                    if ($def -match 'host (\S+)') { return "$($matches[1])/32" }
+                    if ($def -match 'subnet (\S+) (\S+)') { return "$($matches[1]) $($matches[2])" }
+                    return $def
+                }
+                return $reference
+            }
+
+            # Handle group:name format
+            if ($reference -match '^group:(.+)$') {
+                $groupName = $matches[1]
+                $grp = $networkGroups | Where-Object { $_.Name -eq $groupName }
+                if ($grp -and $grp.Members) {
+                    foreach ($member in $grp.Members) {
+                        $resolved = Resolve-ToSubnet $member
+                        if ($resolved -is [array]) {
+                            $results += $resolved
+                        } else {
+                            $results += $resolved
+                        }
+                    }
+                    return $results
+                }
+                return $reference
+            }
+
+            # Handle direct object name (no prefix)
+            $obj = $networkObjects | Where-Object { $_.Name -eq $reference }
             if ($obj) {
                 $def = $obj.Definition
                 if ($def -match 'host (\S+)') { return "$($matches[1])/32" }
@@ -60,10 +94,24 @@ function Get-ASAPhase2Selector {
                 return $def
             }
 
-            $grp = $networkGroups | Where-Object { $_.Name -eq $objectName }
-            if ($grp) { return $grp.Members }
+            $grp = $networkGroups | Where-Object { $_.Name -eq $reference }
+            if ($grp -and $grp.Members) {
+                foreach ($member in $grp.Members) {
+                    $resolved = Resolve-ToSubnet $member
+                    if ($resolved -is [array]) {
+                        $results += $resolved
+                    } else {
+                        $results += $resolved
+                    }
+                }
+                return $results
+            }
 
-            return $objectName
+            # Handle subnet:value and host:value formats
+            if ($reference -match '^subnet:(.+)$') { return $matches[1] }
+            if ($reference -match '^host:(.+)$') { return "$($matches[1])/32" }
+
+            return $reference
         }
 
         $phase2Selectors = @()
