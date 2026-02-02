@@ -25,8 +25,10 @@ function Get-ASAVpnConfig {
 
     .OUTPUTS
         PSCustomObject with properties: Name, Peer, IKEVersion, ACL, TransformSets,
-        PFS, SALifetime, SALifetimeKB, NATTDisable, MapName, Sequence, Interface,
-        LocalNetwork, RemoteNetwork
+        PFS, SALifetime, SALifetimeKB, NATTDisable, MapName, Sequence, Interface
+
+    .NOTES
+        Use Get-ASAPhase2Selector to get LocalNetwork/RemoteNetwork traffic selectors.
     #>
     [CmdletBinding()]
     param(
@@ -55,9 +57,6 @@ function Get-ASAVpnConfig {
             }
         }
 
-        # Get Phase 2 selectors
-        $phase2Selectors = Get-ASAPhase2Selector -Config $configContent
-
         $vpnConfigs = @()
 
         foreach ($cryptoMap in $cryptoMaps) {
@@ -66,9 +65,6 @@ function Get-ASAVpnConfig {
 
             # Only include if it's a S2S tunnel
             if (-not $tunnelGroup -or $tunnelGroup.Type -ne 'ipsec-l2l') { continue }
-
-            # Get phase 2 selector for this peer
-            $selector = $phase2Selectors | Where-Object { $_.Peer -eq $peerIP }
 
             $vpnConfigs += [PSCustomObject]@{
                 Name          = "VPN-$peerIP"
@@ -83,8 +79,6 @@ function Get-ASAVpnConfig {
                 MapName       = $cryptoMap.MapName
                 Sequence      = $cryptoMap.Sequence
                 Interface     = $interfaceBindings[$cryptoMap.MapName]
-                LocalNetwork  = $selector.LocalNet
-                RemoteNetwork = $selector.RemoteNet
             }
         }
 

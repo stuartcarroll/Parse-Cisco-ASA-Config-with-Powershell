@@ -41,8 +41,9 @@ function Get-ASAPhase2Selector {
     process {
         $configContent = Get-ASAConfigContent -ConfigPath $ConfigPath -Config $Config
 
-        # Get required data
-        $vpnConfigs = Get-ASAVpnConfig -Config $configContent
+        # Get required data - use Get-ASACryptoMap directly to avoid circular dependency with Get-ASAVpnConfig
+        $cryptoMaps = Get-ASACryptoMap -Config $configContent
+        $tunnelGroups = Get-ASATunnelGroup -Config $configContent -S2SOnly
         $accessLists = Get-ASAAccessList -Config $configContent
         $networkObjects = Get-ASANetworkObject -Config $configContent
         $networkGroups = Get-ASANetworkGroup -Config $configContent
@@ -67,8 +68,14 @@ function Get-ASAPhase2Selector {
 
         $phase2Selectors = @()
 
-        foreach ($vpn in $vpnConfigs) {
-            $aclName = $vpn.ACL
+        foreach ($cryptoMap in $cryptoMaps) {
+            $peerIP = $cryptoMap.Peer
+
+            # Only include if it's a S2S tunnel
+            $tunnelGroup = $tunnelGroups | Where-Object { $_.PeerIP -eq $peerIP }
+            if (-not $tunnelGroup -or $tunnelGroup.Type -ne 'ipsec-l2l') { continue }
+
+            $aclName = $cryptoMap.ACL
             $aclEntries = $accessLists | Where-Object { $_.ACLName -eq $aclName }
 
             foreach ($entry in $aclEntries) {
@@ -110,8 +117,8 @@ function Get-ASAPhase2Selector {
                 }
 
                 $phase2Selectors += [PSCustomObject]@{
-                    Peer      = $vpn.Peer
-                    VPNName   = $vpn.Name
+                    Peer      = $peerIP
+                    VPNName   = "VPN-$peerIP"
                     LocalNet  = $localNet
                     RemoteNet = $remoteNet
                 }
