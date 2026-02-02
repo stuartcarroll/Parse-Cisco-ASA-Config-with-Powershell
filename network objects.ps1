@@ -638,16 +638,16 @@ write-Host "`Access-Lists:"  -ForegroundColor Green
 $accessLists | Format-Table -AutoSize
 write-Host "`NAT Rules:"  -ForegroundColor Green
 $natRules | Format-Table -AutoSize
-Write-Host "`nIKE Policies (Phase 1):" -ForegroundColor Green
+Write-Host "`IKE Policies (Phase 1):" -ForegroundColor Green
 $ikePolicies | Format-Table -AutoSize
-Write-Host "`nTransform Sets (Phase 2):" -ForegroundColor Green
+Write-Host "`Transform Sets (Phase 2):" -ForegroundColor Green
 $transformSets | Format-Table -AutoSize
-Write-Host "`nTunnel Groups (S2S):" -ForegroundColor Green
+Write-Host "`Tunnel Groups (S2S):" -ForegroundColor Green
 $tunnelGroups | Where-Object { $_.Type -eq 'ipsec-l2l' } | Format-Table -AutoSize
-Write-Host "`nCrypto Maps:" -ForegroundColor Green
+Write-Host "`Crypto Maps:" -ForegroundColor Green
 $cryptoMaps | Format-Table -AutoSize
-Write-Host "`nUnified VPN Configs:" -ForegroundColor Green
+Write-Host "`Unified VPN Configs:" -ForegroundColor Green
 $vpnConfigs | Format-Table -AutoSize
-Write-Host "`nPhase 2 Selectors:" -ForegroundColor Green
+Write-Host "`Phase 2 Selectors:" -ForegroundColor Green
 $phase2Selectors | Format-Table -AutoSize
 
