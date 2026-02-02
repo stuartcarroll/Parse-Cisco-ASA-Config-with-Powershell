@@ -60,13 +60,9 @@ function Get-ASAPhase2Selector {
                 # Case-insensitive lookup
                 $obj = $networkObjects | Where-Object { $_.Name -ieq $objectName }
                 if ($obj) {
-                    $def = $obj.Definition
-                    if ($def -match 'host (\S+)') { return "$($matches[1])/32" }
-                    if ($def -match 'subnet (\S+) (\S+)') { return "$($matches[1]) $($matches[2])" }
-                    if ($def -match 'range (\S+) (\S+)') { return "$($matches[1])-$($matches[2])" }
-                    # Check Value property as fallback
+                    # Use Value property directly (already parsed by Get-ASANetworkObject)
                     if ($obj.Value) { return $obj.Value }
-                    return $def
+                    return $reference
                 }
                 return $reference
             }
@@ -93,12 +89,8 @@ function Get-ASAPhase2Selector {
             # Handle direct object name (no prefix)
             $obj = $networkObjects | Where-Object { $_.Name -ieq $reference }
             if ($obj) {
-                $def = $obj.Definition
-                if ($def -match 'host (\S+)') { return "$($matches[1])/32" }
-                if ($def -match 'subnet (\S+) (\S+)') { return "$($matches[1]) $($matches[2])" }
-                if ($def -match 'range (\S+) (\S+)') { return "$($matches[1])-$($matches[2])" }
                 if ($obj.Value) { return $obj.Value }
-                return $def
+                return $reference
             }
 
             $grp = $networkGroups | Where-Object { $_.Name -ieq $reference }
