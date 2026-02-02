@@ -25,10 +25,8 @@ function Get-ASAVpnConfig {
 
     .OUTPUTS
         PSCustomObject with properties: Name, Peer, IKEVersion, ACL, TransformSets,
-        PFS, SALifetime, SALifetimeKB, NATTDisable, MapName, Sequence, Interface
-
-    .NOTES
-        Use Get-ASAPhase2Selector to get LocalNetwork/RemoteNetwork traffic selectors.
+        PFS, SALifetime, SALifetimeKB, NATTDisable, MapName, Sequence, Interface,
+        LocalSubnets, RemoteSubnets
     #>
     [CmdletBinding()]
     param(
@@ -45,9 +43,10 @@ function Get-ASAVpnConfig {
     process {
         $configContent = Get-ASAConfigContent -ConfigPath $ConfigPath -Config $Config
 
-        # Get crypto maps and tunnel groups using internal calls
+        # Get crypto maps, tunnel groups, and phase 2 selectors
         $cryptoMaps = Get-ASACryptoMap -Config $configContent
         $tunnelGroups = Get-ASATunnelGroup -Config $configContent -S2SOnly
+        $phase2Selectors = Get-ASAPhase2Selector -Config $configContent
 
         # Parse interface bindings: "crypto map outside_map interface outside"
         $interfaceBindings = @{}
@@ -66,6 +65,11 @@ function Get-ASAVpnConfig {
             # Only include if it's a S2S tunnel
             if (-not $tunnelGroup -or $tunnelGroup.Type -ne 'ipsec-l2l') { continue }
 
+            # Get unique local and remote subnets for this peer
+            $peerSelectors = $phase2Selectors | Where-Object { $_.Peer -eq $peerIP }
+            $localSubnets = @($peerSelectors | ForEach-Object { $_.LocalNet } | Where-Object { $_ } | Select-Object -Unique)
+            $remoteSubnets = @($peerSelectors | ForEach-Object { $_.RemoteNet } | Where-Object { $_ } | Select-Object -Unique)
+
             $vpnConfigs += [PSCustomObject]@{
                 Name          = "VPN-$peerIP"
                 Peer          = $peerIP
@@ -79,6 +83,8 @@ function Get-ASAVpnConfig {
                 MapName       = $cryptoMap.MapName
                 Sequence      = $cryptoMap.Sequence
                 Interface     = $interfaceBindings[$cryptoMap.MapName]
+                LocalSubnets  = $localSubnets
+                RemoteSubnets = $remoteSubnets
             }
         }
 
