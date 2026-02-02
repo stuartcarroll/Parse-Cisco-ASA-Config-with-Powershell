@@ -26,7 +26,7 @@ function Get-ASAVpnConfig {
     .OUTPUTS
         PSCustomObject with properties: Name, Peer, IKEVersion, ACL, TransformSets,
         PFS, SALifetime, SALifetimeKB, NATTDisable, MapName, Sequence, Interface,
-        LocalSubnets, RemoteSubnets
+        LocalSubnetsRaw, LocalSubnets, RemoteSubnetsRaw, RemoteSubnets
     #>
     [CmdletBinding()]
     param(
@@ -65,26 +65,30 @@ function Get-ASAVpnConfig {
             # Only include if it's a S2S tunnel
             if (-not $tunnelGroup -or $tunnelGroup.Type -ne 'ipsec-l2l') { continue }
 
-            # Get unique local and remote subnets for this peer
+            # Get unique local and remote subnets for this peer (both raw and resolved)
             $peerSelectors = $phase2Selectors | Where-Object { $_.Peer -eq $peerIP }
+            $localSubnetsRaw = @($peerSelectors | ForEach-Object { $_.LocalNetRaw } | Where-Object { $_ } | Select-Object -Unique)
             $localSubnets = @($peerSelectors | ForEach-Object { $_.LocalNet } | Where-Object { $_ } | Select-Object -Unique)
+            $remoteSubnetsRaw = @($peerSelectors | ForEach-Object { $_.RemoteNetRaw } | Where-Object { $_ } | Select-Object -Unique)
             $remoteSubnets = @($peerSelectors | ForEach-Object { $_.RemoteNet } | Where-Object { $_ } | Select-Object -Unique)
 
             $vpnConfigs += [PSCustomObject]@{
-                Name          = "VPN-$peerIP"
-                Peer          = $peerIP
-                IKEVersion    = $tunnelGroup.IKEVersion
-                ACL           = $cryptoMap.ACL
-                TransformSets = $cryptoMap.TransformSets
-                PFS           = $cryptoMap.PFS
-                SALifetime    = $cryptoMap.SALifetime
-                SALifetimeKB  = $cryptoMap.SALifetimeKB
-                NATTDisable   = $cryptoMap.NATTDisable
-                MapName       = $cryptoMap.MapName
-                Sequence      = $cryptoMap.Sequence
-                Interface     = $interfaceBindings[$cryptoMap.MapName]
-                LocalSubnets  = $localSubnets
-                RemoteSubnets = $remoteSubnets
+                Name             = "VPN-$peerIP"
+                Peer             = $peerIP
+                IKEVersion       = $tunnelGroup.IKEVersion
+                ACL              = $cryptoMap.ACL
+                TransformSets    = $cryptoMap.TransformSets
+                PFS              = $cryptoMap.PFS
+                SALifetime       = $cryptoMap.SALifetime
+                SALifetimeKB     = $cryptoMap.SALifetimeKB
+                NATTDisable      = $cryptoMap.NATTDisable
+                MapName          = $cryptoMap.MapName
+                Sequence         = $cryptoMap.Sequence
+                Interface        = $interfaceBindings[$cryptoMap.MapName]
+                LocalSubnetsRaw  = $localSubnetsRaw
+                LocalSubnets     = $localSubnets
+                RemoteSubnetsRaw = $remoteSubnetsRaw
+                RemoteSubnets    = $remoteSubnets
             }
         }
 

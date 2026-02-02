@@ -24,7 +24,7 @@ function Get-ASAPhase2Selector {
         Get-ASAPhase2Selector -ConfigPath "config.txt" -Peer "203.0.113.1"
 
     .OUTPUTS
-        PSCustomObject with properties: Peer, VPNName, LocalNet, RemoteNet
+        PSCustomObject with properties: Peer, VPNName, LocalNetRaw, LocalNet, RemoteNetRaw, RemoteNet
     #>
     [CmdletBinding()]
     param(
@@ -57,11 +57,15 @@ function Get-ASAPhase2Selector {
             # Handle object:name format
             if ($reference -match '^object:(.+)$') {
                 $objectName = $matches[1]
-                $obj = $networkObjects | Where-Object { $_.Name -eq $objectName }
+                # Case-insensitive lookup
+                $obj = $networkObjects | Where-Object { $_.Name -ieq $objectName }
                 if ($obj) {
                     $def = $obj.Definition
                     if ($def -match 'host (\S+)') { return "$($matches[1])/32" }
                     if ($def -match 'subnet (\S+) (\S+)') { return "$($matches[1]) $($matches[2])" }
+                    if ($def -match 'range (\S+) (\S+)') { return "$($matches[1])-$($matches[2])" }
+                    # Check Value property as fallback
+                    if ($obj.Value) { return $obj.Value }
                     return $def
                 }
                 return $reference
@@ -70,7 +74,8 @@ function Get-ASAPhase2Selector {
             # Handle group:name format
             if ($reference -match '^group:(.+)$') {
                 $groupName = $matches[1]
-                $grp = $networkGroups | Where-Object { $_.Name -eq $groupName }
+                # Case-insensitive lookup
+                $grp = $networkGroups | Where-Object { $_.Name -ieq $groupName }
                 if ($grp -and $grp.Members) {
                     foreach ($member in $grp.Members) {
                         $resolved = Resolve-ToSubnet $member
@@ -86,15 +91,17 @@ function Get-ASAPhase2Selector {
             }
 
             # Handle direct object name (no prefix)
-            $obj = $networkObjects | Where-Object { $_.Name -eq $reference }
+            $obj = $networkObjects | Where-Object { $_.Name -ieq $reference }
             if ($obj) {
                 $def = $obj.Definition
                 if ($def -match 'host (\S+)') { return "$($matches[1])/32" }
                 if ($def -match 'subnet (\S+) (\S+)') { return "$($matches[1]) $($matches[2])" }
+                if ($def -match 'range (\S+) (\S+)') { return "$($matches[1])-$($matches[2])" }
+                if ($obj.Value) { return $obj.Value }
                 return $def
             }
 
-            $grp = $networkGroups | Where-Object { $_.Name -eq $reference }
+            $grp = $networkGroups | Where-Object { $_.Name -ieq $reference }
             if ($grp -and $grp.Members) {
                 foreach ($member in $grp.Members) {
                     $resolved = Resolve-ToSubnet $member
@@ -127,48 +134,22 @@ function Get-ASAPhase2Selector {
             $aclEntries = $accessLists | Where-Object { $_.ACLName -eq $aclName }
 
             foreach ($entry in $aclEntries) {
-                $localNet = $null
-                $remoteNet = $null
+                $localNetRaw = $entry.Source
+                $remoteNetRaw = $entry.Destination
 
-                # Resolve source (local network)
-                if ($entry.Source -match '^object:(.+)$') {
-                    $localNet = Resolve-ToSubnet $matches[1]
-                }
-                elseif ($entry.Source -match '^group:(.+)$') {
-                    $localNet = Resolve-ToSubnet $matches[1]
-                }
-                elseif ($entry.Source -match '^subnet:(.+)$') {
-                    $localNet = $matches[1]
-                }
-                elseif ($entry.Source -match '^host:(.+)$') {
-                    $localNet = "$($matches[1])/32"
-                }
-                else {
-                    $localNet = $entry.Source
-                }
+                # Resolve source (local network) - pass full reference for resolution
+                $localNet = Resolve-ToSubnet $entry.Source
 
-                # Resolve destination (remote network)
-                if ($entry.Destination -match '^object:(.+)$') {
-                    $remoteNet = Resolve-ToSubnet $matches[1]
-                }
-                elseif ($entry.Destination -match '^group:(.+)$') {
-                    $remoteNet = Resolve-ToSubnet $matches[1]
-                }
-                elseif ($entry.Destination -match '^subnet:(.+)$') {
-                    $remoteNet = $matches[1]
-                }
-                elseif ($entry.Destination -match '^host:(.+)$') {
-                    $remoteNet = "$($matches[1])/32"
-                }
-                else {
-                    $remoteNet = $entry.Destination
-                }
+                # Resolve destination (remote network) - pass full reference for resolution
+                $remoteNet = Resolve-ToSubnet $entry.Destination
 
                 $phase2Selectors += [PSCustomObject]@{
-                    Peer      = $peerIP
-                    VPNName   = "VPN-$peerIP"
-                    LocalNet  = $localNet
-                    RemoteNet = $remoteNet
+                    Peer         = $peerIP
+                    VPNName      = "VPN-$peerIP"
+                    LocalNetRaw  = $localNetRaw
+                    LocalNet     = $localNet
+                    RemoteNetRaw = $remoteNetRaw
+                    RemoteNet    = $remoteNet
                 }
             }
         }
