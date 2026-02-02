@@ -40,6 +40,7 @@
         'Get-ASACryptoMap',
         'Get-ASAVpnConfig',
         'Get-ASAPhase2Selector',
+        'Get-ASAInboundNAT',
         'Resolve-ASAObject'
     )
 
