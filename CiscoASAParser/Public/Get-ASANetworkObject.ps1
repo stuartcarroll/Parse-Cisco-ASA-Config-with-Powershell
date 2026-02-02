@@ -43,14 +43,16 @@ function Get-ASANetworkObject {
     .OUTPUTS
         PSCustomObject with properties:
         - Name: Object name
-        - Type: host, subnet, range, fqdn, nat, or unknown
+        - Type: host, subnet, range, fqdn, or unknown
+        - Value: Real/original IP address, subnet, or FQDN
+        - TranslatedIP: Mapped/NAT IP address (if object has NAT)
+        - HasNAT: Boolean indicating if object has inline NAT
         - SourceZone: NAT source zone (if applicable)
         - DestZone: NAT destination zone (if applicable)
         - NatType: static or dynamic (if applicable)
-        - Value: IP address, subnet, or FQDN value
-        - ServiceProto: Service protocol (if NAT includes service)
-        - OriginalPort: Original port (if NAT includes service)
-        - TranslatedPort: Translated port (if NAT includes service)
+        - ServiceProto: Service protocol (if NAT includes PAT)
+        - OriginalPort: Original port (if NAT includes PAT)
+        - TranslatedPort: Translated port (if NAT includes PAT)
         - Definition: Raw definition lines
     #>
     [CmdletBinding()]
@@ -65,7 +67,7 @@ function Get-ASANetworkObject {
         [string]$Name,
 
         [Parameter(Mandatory = $false)]
-        [ValidateSet('host', 'subnet', 'range', 'fqdn', 'nat', 'unknown')]
+        [ValidateSet('host', 'subnet', 'range', 'fqdn', 'unknown')]
         [string]$Type
     )
 
@@ -79,7 +81,8 @@ function Get-ASANetworkObject {
         # Get all matches
         $networkMatches = [regex]::Matches($configContent, $networkPattern)
 
-        $networkObjects = @()
+        # Use hashtable to merge duplicate object definitions
+        $objectHash = @{}
 
         foreach ($match in $networkMatches) {
             $block = $match.Value
@@ -88,77 +91,90 @@ function Get-ASANetworkObject {
             $objName = ($block -split '\r?\n')[0] -replace '^object network ', ''
 
             # Extract the definition lines
-            $definition = ($block -split '\r?\n' | Select-Object -Skip 1) -join "`n" | ForEach-Object { $_.Trim() }
+            $blockDefinition = ($block -split '\r?\n' | Select-Object -Skip 1) -join "`n" | ForEach-Object { $_.Trim() }
 
-            # Determine the type of network object
-            $objType = switch -Regex ($definition) {
-                '^host'   { 'host' }
-                '^subnet' { 'subnet' }
-                '^range'  { 'range' }
-                '^fqdn'   { 'fqdn' }
-                '^nat'    { 'nat' }
-                default   { 'unknown' }
+            # Initialize or get existing object data
+            if (-not $objectHash.ContainsKey($objName)) {
+                $objectHash[$objName] = @{
+                    Type           = 'unknown'
+                    Value          = $null
+                    TranslatedIP   = $null
+                    HasNAT         = $false
+                    SourceZone     = $null
+                    DestZone       = $null
+                    NatType        = $null
+                    ServiceProto   = $null
+                    OriginalPort   = $null
+                    TranslatedPort = $null
+                    Definition     = @()
+                }
             }
 
-            # Extract the value based on the type
-            $value = switch -Regex ($definition) {
-                'host (\S+)'       { $matches[1] }
-                'subnet (\S+)'     { $matches[1] }
-                'range (\S+)'      { $matches[1] }
-                'fqdn v4 (\S+)'    { $matches[1] }
-                'fqdn (\S+)'       { $matches[1] }
-                'static (\S+)'     { $matches[1] }
-                'dynamic interface' { 'interface' }
-                default            { $null }
+            $objData = $objectHash[$objName]
+            $objData.Definition += $blockDefinition
+
+            # Parse each line independently to capture both address and NAT info
+            $lines = ($block -split '\r?\n' | Select-Object -Skip 1) | ForEach-Object { $_.Trim() }
+
+            foreach ($line in $lines) {
+                # Base address types
+                if ($line -match '^host (\S+)') {
+                    $objData.Type = 'host'
+                    $objData.Value = $matches[1]
+                }
+                elseif ($line -match '^subnet (\S+) (\S+)') {
+                    $objData.Type = 'subnet'
+                    $objData.Value = "$($matches[1])/$($matches[2])"
+                }
+                elseif ($line -match '^range (\S+) (\S+)') {
+                    $objData.Type = 'range'
+                    $objData.Value = "$($matches[1])-$($matches[2])"
+                }
+                elseif ($line -match '^fqdn v4 (\S+)') {
+                    $objData.Type = 'fqdn'
+                    $objData.Value = $matches[1]
+                }
+                elseif ($line -match '^fqdn (\S+)') {
+                    $objData.Type = 'fqdn'
+                    $objData.Value = $matches[1]
+                }
+
+                # NAT info (not elseif - can coexist with host/subnet)
+                if ($line -match '^nat \((\S+),(\S+)\) (static|dynamic) (\S+)') {
+                    $objData.SourceZone = $matches[1]
+                    $objData.DestZone = $matches[2]
+                    $objData.NatType = $matches[3]
+                    $objData.TranslatedIP = $matches[4]
+                    $objData.HasNAT = $true
+                }
+
+                # PAT service info
+                if ($line -match 'service (\S+) (\S+) (\S+)$') {
+                    $objData.ServiceProto = $matches[1]
+                    $objData.OriginalPort = $matches[2]
+                    $objData.TranslatedPort = $matches[3]
+                }
             }
+        }
 
-            # Extract subnet mask if present
-            if ($definition -match 'subnet (\S+) (\S+)') {
-                $value = "$($matches[1])/$($matches[2])"
-            }
-
-            # Extract range end if present
-            if ($definition -match 'range (\S+) (\S+)') {
-                $value = "$($matches[1])-$($matches[2])"
-            }
-
-            # For NAT objects, extract source and destination zones if available
-            $sourceZone = $null
-            $destZone = $null
-            $natType = $null
-
-            if ($definition -match 'nat \((\S+),(\S+)\) (static|dynamic)') {
-                $sourceZone = $matches[1]
-                $destZone = $matches[2]
-                $natType = $matches[3]
-            }
-
-            # For service objects, extract protocol and ports if available
-            $serviceProto = $null
-            $serviceOrigPort = $null
-            $serviceTransPort = $null
-
-            if ($definition -match 'service (\S+) (\S+) (\S+)$') {
-                $serviceProto = $matches[1]
-                $serviceOrigPort = $matches[2]
-                $serviceTransPort = $matches[3]
-            }
-
-            # Create the output object
-            $obj = [PSCustomObject]@{
+        # Convert hashtable to array of objects
+        $networkObjects = @()
+        foreach ($objName in $objectHash.Keys) {
+            $data = $objectHash[$objName]
+            $networkObjects += [PSCustomObject]@{
                 Name           = $objName
-                Type           = $objType
-                SourceZone     = $sourceZone
-                DestZone       = $destZone
-                NatType        = $natType
-                Value          = $value
-                ServiceProto   = $serviceProto
-                OriginalPort   = $serviceOrigPort
-                TranslatedPort = $serviceTransPort
-                Definition     = $definition
+                Type           = $data.Type
+                Value          = $data.Value
+                TranslatedIP   = $data.TranslatedIP
+                HasNAT         = $data.HasNAT
+                SourceZone     = $data.SourceZone
+                DestZone       = $data.DestZone
+                NatType        = $data.NatType
+                ServiceProto   = $data.ServiceProto
+                OriginalPort   = $data.OriginalPort
+                TranslatedPort = $data.TranslatedPort
+                Definition     = $data.Definition -join "`n"
             }
-
-            $networkObjects += $obj
         }
 
         # Apply filters

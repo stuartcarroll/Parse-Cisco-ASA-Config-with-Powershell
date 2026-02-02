@@ -4,8 +4,10 @@ function Get-ASANatRule {
         Parses NAT rules from a Cisco ASA configuration.
 
     .DESCRIPTION
-        Extracts all 'nat' statements (twice NAT format) from an ASA running configuration
-        and returns them as PowerShell objects with zone, source/destination mappings,
+        Extracts NAT rules from an ASA running configuration including:
+        - Twice NAT (standalone nat statements)
+        - Object NAT (nat defined inside object network blocks)
+        Returns them as PowerShell objects with zone, source/destination mappings,
         and NAT category classification.
 
     .PARAMETER ConfigPath
@@ -15,7 +17,10 @@ function Get-ASANatRule {
         Raw ASA configuration content as a string.
 
     .PARAMETER Category
-        Filter results by NAT category: Identity/NoNAT, SourceNAT, DestNAT, or TwiceNAT.
+        Filter results by NAT category: Identity/NoNAT, SourceNAT, DestNAT, TwiceNAT, or ObjectNAT.
+
+    .PARAMETER NatStyle
+        Filter by NAT style: ObjectNAT (inline in objects), TwiceNAT (standalone), or All.
 
     .PARAMETER SourceZone
         Filter results by source zone/interface.
@@ -32,9 +37,14 @@ function Get-ASANatRule {
     .EXAMPLE
         Get-ASANatRule -ConfigPath "config.txt" -SourceZone "inside"
 
+    .EXAMPLE
+        Get-ASANatRule -ConfigPath "config.txt" -NatStyle "ObjectNAT"
+
+        Returns only Object NAT rules (NAT defined inside network objects).
+
     .OUTPUTS
         PSCustomObject with properties: SourceZone, DestZone, SourceType, RealSource,
-        MappedSource, DestType, RealDest, MappedDest, Category, NoProxyArp, RouteLookup
+        MappedSource, DestType, RealDest, MappedDest, Category, ObjectName, NoProxyArp, RouteLookup
     #>
     [CmdletBinding()]
     param(
@@ -45,8 +55,12 @@ function Get-ASANatRule {
         [string]$Config,
 
         [Parameter(Mandatory = $false)]
-        [ValidateSet('Identity/NoNAT', 'SourceNAT', 'DestNAT', 'TwiceNAT')]
+        [ValidateSet('Identity/NoNAT', 'SourceNAT', 'DestNAT', 'TwiceNAT', 'ObjectNAT')]
         [string]$Category,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('ObjectNAT', 'TwiceNAT', 'All')]
+        [string]$NatStyle = 'All',
 
         [Parameter(Mandatory = $false)]
         [string]$SourceZone,
@@ -104,12 +118,86 @@ function Get-ASANatRule {
                 RealDest     = $realDest
                 MappedDest   = $mappedDest
                 Category     = $natCategory
+                ObjectName   = $null
+                NatStyle     = 'TwiceNAT'
                 NoProxyArp   = $noProxyArp
                 RouteLookup  = $routeLookup
             }
         }
 
+        # Parse Object NAT (NAT defined inside object network blocks)
+        # First collect all blocks by object name to handle split definitions
+        $objectNatPattern = '(?m)^object network (\S+)\r?\n(?: .+\r?\n?)+'
+        $objectNatMatches = [regex]::Matches($configContent, $objectNatPattern)
+
+        $objectBlocks = @{}
+        foreach ($match in $objectNatMatches) {
+            $block = $match.Value
+            $objName = ($block -split '\r?\n')[0] -replace '^object network ', ''
+
+            if (-not $objectBlocks.ContainsKey($objName)) {
+                $objectBlocks[$objName] = @{
+                    RealIP       = $null
+                    TranslatedIP = $null
+                    SourceZone   = $null
+                    DestZone     = $null
+                    NatType      = $null
+                    HasNAT       = $false
+                }
+            }
+
+            $data = $objectBlocks[$objName]
+
+            # Parse each line
+            $lines = ($block -split '\r?\n' | Select-Object -Skip 1) | ForEach-Object { $_.Trim() }
+            foreach ($line in $lines) {
+                if ($line -match '^host (\S+)') {
+                    $data.RealIP = $matches[1]
+                }
+                elseif ($line -match '^subnet (\S+) (\S+)') {
+                    $data.RealIP = "$($matches[1])/$($matches[2])"
+                }
+                elseif ($line -match '^range (\S+) (\S+)') {
+                    $data.RealIP = "$($matches[1])-$($matches[2])"
+                }
+
+                if ($line -match '^nat \((\S+),(\S+)\) (static|dynamic) (\S+)') {
+                    $data.SourceZone = $matches[1]
+                    $data.DestZone = $matches[2]
+                    $data.NatType = $matches[3]
+                    $data.TranslatedIP = $matches[4]
+                    $data.HasNAT = $true
+                }
+            }
+        }
+
+        # Create NAT rules from merged object data
+        foreach ($objName in $objectBlocks.Keys) {
+            $data = $objectBlocks[$objName]
+            if ($data.HasNAT) {
+                $natRules += [PSCustomObject]@{
+                    SourceZone   = $data.SourceZone
+                    DestZone     = $data.DestZone
+                    SourceType   = $data.NatType
+                    RealSource   = $data.RealIP
+                    MappedSource = $data.TranslatedIP
+                    DestType     = $null
+                    RealDest     = $null
+                    MappedDest   = $null
+                    Category     = 'ObjectNAT'
+                    ObjectName   = $objName
+                    NatStyle     = 'ObjectNAT'
+                    NoProxyArp   = $false
+                    RouteLookup  = $false
+                }
+            }
+        }
+
         # Apply filters
+        if ($NatStyle -ne 'All') {
+            $natRules = $natRules | Where-Object { $_.NatStyle -eq $NatStyle }
+        }
+
         if ($Category) {
             $natRules = $natRules | Where-Object { $_.Category -eq $Category }
         }

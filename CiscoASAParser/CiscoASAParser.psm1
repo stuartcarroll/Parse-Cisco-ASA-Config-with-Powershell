@@ -24,7 +24,8 @@
 $ModuleRoot = $PSScriptRoot
 
 # Import private functions
-$PrivateFunctions = Get-ChildItem -Path "$ModuleRoot\Private\*.ps1" -ErrorAction SilentlyContinue
+$PrivatePath = Join-Path $ModuleRoot "Private"
+$PrivateFunctions = @(Get-ChildItem -LiteralPath $PrivatePath -Filter "*.ps1" -ErrorAction SilentlyContinue)
 foreach ($Function in $PrivateFunctions) {
     try {
         . $Function.FullName
@@ -35,7 +36,8 @@ foreach ($Function in $PrivateFunctions) {
 }
 
 # Import public functions
-$PublicFunctions = Get-ChildItem -Path "$ModuleRoot\Public\*.ps1" -ErrorAction SilentlyContinue
+$PublicPath = Join-Path $ModuleRoot "Public"
+$PublicFunctions = @(Get-ChildItem -LiteralPath $PublicPath -Filter "*.ps1" -ErrorAction SilentlyContinue)
 foreach ($Function in $PublicFunctions) {
     try {
         . $Function.FullName
