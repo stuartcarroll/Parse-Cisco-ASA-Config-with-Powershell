@@ -46,7 +46,7 @@ function Get-ASAPhase2Selector {
         $tunnelGroups = Get-ASATunnelGroup -Config $configContent -S2SOnly
         $accessLists = Get-ASAAccessList -Config $configContent
         $networkObjects = Get-ASANetworkObject -Config $configContent
-        $networkGroups = Get-ASANetworkGroup -Config $configContent
+        $networkGroups = Get-ASANetworkGroup -Config $configContent -ExpandMembers
 
         # Helper function to resolve object/group to subnet(s) recursively
         function Resolve-ToSubnet {
