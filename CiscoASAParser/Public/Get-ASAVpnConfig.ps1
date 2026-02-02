@@ -25,7 +25,8 @@ function Get-ASAVpnConfig {
 
     .OUTPUTS
         PSCustomObject with properties: Name, Peer, IKEVersion, ACL, TransformSets,
-        PFS, SALifetime, NATTDisable
+        PFS, SALifetime, SALifetimeKB, NATTDisable, MapName, Sequence, Interface,
+        LocalNetwork, RemoteNetwork
     #>
     [CmdletBinding()]
     param(
@@ -46,6 +47,17 @@ function Get-ASAVpnConfig {
         $cryptoMaps = Get-ASACryptoMap -Config $configContent
         $tunnelGroups = Get-ASATunnelGroup -Config $configContent -S2SOnly
 
+        # Parse interface bindings: "crypto map outside_map interface outside"
+        $interfaceBindings = @{}
+        $configContent -split '\r?\n' | ForEach-Object {
+            if ($_ -match '^crypto map (\S+) interface (\S+)$') {
+                $interfaceBindings[$matches[1]] = $matches[2]
+            }
+        }
+
+        # Get Phase 2 selectors
+        $phase2Selectors = Get-ASAPhase2Selector -Config $configContent
+
         $vpnConfigs = @()
 
         foreach ($cryptoMap in $cryptoMaps) {
@@ -55,6 +67,9 @@ function Get-ASAVpnConfig {
             # Only include if it's a S2S tunnel
             if (-not $tunnelGroup -or $tunnelGroup.Type -ne 'ipsec-l2l') { continue }
 
+            # Get phase 2 selector for this peer
+            $selector = $phase2Selectors | Where-Object { $_.Peer -eq $peerIP }
+
             $vpnConfigs += [PSCustomObject]@{
                 Name          = "VPN-$peerIP"
                 Peer          = $peerIP
@@ -63,7 +78,13 @@ function Get-ASAVpnConfig {
                 TransformSets = $cryptoMap.TransformSets
                 PFS           = $cryptoMap.PFS
                 SALifetime    = $cryptoMap.SALifetime
+                SALifetimeKB  = $cryptoMap.SALifetimeKB
                 NATTDisable   = $cryptoMap.NATTDisable
+                MapName       = $cryptoMap.MapName
+                Sequence      = $cryptoMap.Sequence
+                Interface     = $interfaceBindings[$cryptoMap.MapName]
+                LocalNetwork  = $selector.LocalNet
+                RemoteNetwork = $selector.RemoteNet
             }
         }
 
